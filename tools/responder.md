@@ -43,6 +43,7 @@ Machine accounts end with `$` — a DC machine account hash = coercion confirmed
 ## Notes
 - Always run in `-A` mode unless active poisoning is in scope
 - Interface is typically `eth0` or `tun0` (VPN)
+- Logs saved to `/usr/share/responder/logs/`
 
 ## Related
 - [[tools/nxc]]

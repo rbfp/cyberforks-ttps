@@ -14,6 +14,10 @@ Abuses MS-EVEN (Event Log) protocol to force NTLM authentication from a target. 
 - Protocol: MS-EVEN (Event Log)
 - Forces target to initiate NTLM auth to attacker listener
 
+## Notes
+- Less documented than PetitPotam/PrinterBug but same impact
+- Detected by `coerce_plus` module in [[tools/nxc]]
+
 ## Remediation
 - Enable SMB signing and LDAP signing
 - Network segmentation limiting port 445 access to DCs

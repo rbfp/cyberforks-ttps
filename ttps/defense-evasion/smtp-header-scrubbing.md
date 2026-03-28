@@ -8,97 +8,68 @@
 ---
 
 ## Summary
-Strip or replace mail headers that expose sending infrastructure identity before mail leaves the local MTA. Without scrubbing, Postfix and swaks leak the operator's hostname, internal IPs, and tool fingerprints into headers that analysts and mail security tools inspect.
+Strip or replace SMTP headers that expose sending infrastructure before mail leaves the local MTA. Without scrubbing, Postfix and swaks leak operator hostname, internal IPs, and tool fingerprints into headers visible to analysts and mail security tools.
 
----
+## Mechanism
+- **Protocol:** SMTP header injection / Postfix regexp filter
+- **RPC/Function:** `header_checks = regexp:` in Postfix main.cf; `myhostname`, `smtp_helo_name` overrides
+- **Effect:** Internal hostnames, tool fingerprints, and Postfix-generated identifiers are removed before mail is signed and relayed
 
-## Headers That Leak Identity
-
-| Header | Default Value | Problem |
-|---|---|---|
-| `Received: from` (internal hop) | `kali-linux-2024-2.localdomain (localhost [127.0.0.1])` | Exposes operator hostname and OS |
-| `X-Mailer` | `swaks vX.X.X` | Identifies attack tool |
-| `Message-ID` (Postfix-generated) | `<timestamp.pid@kali-linux-2024-2.localdomain>` | Exposes operator hostname |
-| `EHLO` / `HELO` | `kali-linux-2024-2.localdomain` | Exposes operator hostname to receiving MX |
-
----
-
-## Postfix Header Scrubbing Config
-
-### 1 — Fix HELO/Hostname
-
+## Commands
 ```bash
+# Fix HELO hostname
 sudo postconf -e "myhostname = mail.yourdomain.com"
 sudo postconf -e "mydomain = yourdomain.com"
 sudo postconf -e "smtp_helo_name = mail.yourdomain.com"
-```
-
-### 2 — Strip Leaking Headers via Regexp Filter
-
-```bash
 sudo postconf -e "header_checks = regexp:/etc/postfix/header_checks"
 
+# Header scrubbing rules
 sudo tee /etc/postfix/header_checks > /dev/null << 'EOF'
 /^Received: from.*localhost/    IGNORE
 /^X-Mailer:/                    IGNORE
 /^Message-Id:.*localdomain/     IGNORE
 EOF
+# Do NOT run postmap — regexp files are read directly
 
-sudo systemctl restart postfix
+# Supply clean headers via swaks
+swaks ... \
+  --header "Message-ID: <$(date +%s).$(shuf -i 1000-9999 -n1)@yourdomain.com>" \
+  --header "Date: $(date -R)"
 ```
 
-> **Do NOT run `postmap` on this file.** Regexp files are read directly — running postmap produces a harmless warning but does nothing useful.
-
----
-
-## Supply Clean Message-ID via swaks
-
-Override Postfix's auto-generated Message-ID by injecting your own via `--header`:
-
-```bash
---header "Message-ID: <$(date +%s).$(shuf -i 1000-9999 -n1)@yourdomain.com>"
---header "Date: $(date -R)"
+## Expected Output
 ```
-
-Postfix's regexp filter then drops its own generated `Message-Id:` header (matches `.*localdomain`) and uses the swaks-supplied one.
-
----
-
-## Before/After
-
-**Before scrubbing (headers visible to analyst):**
-```
+# Before scrubbing (visible to analyst in raw headers)
 Received: from kali-linux-2024-2.localdomain (localhost [127.0.0.1])
 X-Mailer: swaks v20201014.0
 Message-ID: <20260308153426.121668@kali-linux-2024-2.localdomain>
-```
 
-**After scrubbing:**
-```
-Message-ID: <1773019553.9931@yourdomain.com>
+# After scrubbing
+Message-ID: <1773019553.9931@target-portal.com>
 Date: Sun, 08 Mar 2026 18:25:53 -0800
+# Internal Received hop, X-Mailer, and localdomain Message-ID all gone
 ```
-
-Internal Received hop, tool fingerprint, and hostname all gone.
-
----
-
-## Remaining Observable (Cannot Scrub)
-
-| Observable | What It Reveals | Mitigation |
-|---|---|---|
-| Sending IP in outermost `Received:` | Your public IP | Use VPS with clean PTR; home lab = residential ISP visible |
-| PTR record on sending IP | ISP hostname (e.g., `syn-165-162-030-026.res.spectrum.com`) | VPS only — ISP controls PTR for residential |
-| IP reputation (Talos, Spamhaus) | ISP/VPN reputation | Use clean VPS IP; avoid VPN exits with poor Talos scores |
-
----
 
 ## Notes
-- Scrubbing is most important when sending to security-aware targets who inspect raw headers
-- Even after scrubbing, the outermost `Received:` header added by the target's MX will always record your sending IP — scrubbing only controls what you inject
-- DKIM signature covers headers at signing time — scrubbing must happen before signing (Postfix processes header_checks before passing to OpenDKIM milter)
+**corp.local engagement (2026-03-08):**
+- Before scrubbing: headers showed `kali-linux-2024-2.localdomain` in Received, X-Mailer: swaks, and Postfix-generated Message-ID with localdomain suffix
+- After scrubbing: headers clean — HELO shows `mail.target-portal.com`, no tool fingerprint, clean Message-ID
 
----
+**What cannot be scrubbed:**
+- Outermost `Received:` header added by target's MX — always records your sending IP
+- PTR record on sending IP — ISP controls for residential; VPS allows custom PTR
+- DKIM signature covers headers at signing time — scrubbing processes before OpenDKIM milter, so signed headers are already clean
+
+**HELO SPF record:**
+- mail-tester.com flagged `SPF: HELO does not publish an SPF record` — add TXT record on `mail.yourdomain.com` with same SPF as root domain
+- This brought mail-tester score from ~7 to 8.9/10
+
+## Relay / Follow-On Attack Path
+Scrubbing is most impactful when the target has a SOC that reviews email headers on suspicious mail. Combined with DKIM signing, the mail looks fully legitimate from a technical standpoint.
+
+## Remediation
+- End-user: inspect raw headers on suspicious mail (Gmail: Show original; Outlook: View source)
+- Gateway: configure header inspection rules to flag mail where HELO doesn't match From domain
 
 ## Related
 - [[ttps/resource-development/dkim-infrastructure-setup]]

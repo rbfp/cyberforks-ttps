@@ -15,6 +15,10 @@ Abuses MS-EFSRPC (Encrypting File System Remote Protocol) to force a target mach
 - RPC call: `EfsRpcAddUsersToFile` (and others)
 - Forces target to initiate NTLM authentication to attacker-controlled listener
 
+## Detection
+- `coerce_plus` module in [[tools/nxc]]
+- Confirmed via NTLMv1/v2 hash capture in [[tools/responder]]
+
 ## Relay Attack Path
 ```
 Coerce DC auth → Relay to AD CS (ESC8) → Get DC certificate → DCSync → Domain Admin

@@ -20,6 +20,13 @@ Abuses MS-RPRN (Print Spooler / spoolss) to force a target machine to authentica
 - Print Spooler enabled by default on most Windows hosts including DCs
 - DCs do not need the Print Spooler service — safe to disable
 
+## Detection
+- `coerce_plus` module in [[tools/nxc]]
+- Passive scanners cannot reliably detect — requires active coercion attempt
+
+## Relay Attack Path
+Same as [[ttps/coercion/petitpotam]] — relay captured hash to AD CS, LDAP, etc.
+
 ## Remediation
 - **Disable Print Spooler on all Domain Controllers**
   ```powershell

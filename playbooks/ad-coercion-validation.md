@@ -23,6 +23,7 @@ Validate that Domain Controllers are vulnerable to NTLM authentication coercion 
 
 ## Step 1 — DC Discovery (Unauthenticated)
 
+Query DNS SRV records to enumerate Domain Controllers:
 ```bash
 nslookup -type=SRV _ldap._tcp.dc._msdcs.<domain> \
   | grep ldap \
@@ -35,7 +36,7 @@ nslookup -type=SRV _ldap._tcp.dc._msdcs.<domain> \
 ## Step 2 — Confirm Hosts Alive
 
 ```bash
-while read -r host; do ping -c 1 -W 1 "$host"; done \
+<hostnames> | while read -r host; do ping -c 1 -W 1 "$host"; done \
   | grep PING \
   | cut -d' ' -f 3 \
   | tr -d '()'
@@ -105,6 +106,13 @@ COERCE_PLUS <IP> 445 <HOSTNAME> VULNERABLE, MSEven
 
 ---
 
+## Validation Scope Notes
+- One confirmed DC is typically sufficient if finding is domain-wide
+- Match scope to what the original report listed (specific IPs vs "domain controllers")
+- DC config (Spooler, EFS, DFS) is usually uniform across all DCs in a domain
+
+---
+
 ## Relay Attack Path (for report context)
 ```
 Coerce DC auth outbound
@@ -115,14 +123,13 @@ Coerce DC auth outbound
 ---
 
 ## Remediation
-
-| Technique | Fix |
-|-----------|-----|
-| PrinterBug | Disable Print Spooler on all DCs |
-| PetitPotam | Disable EFS RPC; enable EPA on AD CS |
-| DFSCoerce | Disable DFS Namespace service where unused |
-| MSEven | SMB/LDAP signing; network segmentation |
-| All | Enforce SMB signing + LDAP signing |
+| Technique  | Fix                                                                              |
+| ---------- | -------------------------------------------------------------------------------- |
+| PrinterBug | Disable Print Spooler on all DCs                                                 |
+| PetitPotam | Disable EFS RPC; enable EPA on AD CS                                             |
+| DFSCoerce  | Disable DFS YooNamespace service where unused                                    |
+| MSEven     | SMB/LDAP signing; network segmentation                                           |
+| All        | Enforce SMB signing + LDAP signing (neutralizes relay even if coercion succeeds) |
 
 ---
 

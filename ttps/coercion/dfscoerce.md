@@ -15,6 +15,10 @@ Abuses MS-DFSNM (Distributed File System Namespace Management) to force NTLM aut
 - RPC calls: `netdfs\NetrDfsRemoveRootTarget`, `netdfs\NetrDfsAddStdRoot`, `netdfs\NetrDfsRemoveStdRoot`
 - Forces target to initiate NTLM auth to attacker listener
 
+## Detection
+- `coerce_plus` module in [[tools/nxc]]
+- Multiple exploit methods — if one is blocked others may still work
+
 ## Remediation
 - Disable DFS Namespace service where not needed
 - Enable SMB signing and LDAP signing
