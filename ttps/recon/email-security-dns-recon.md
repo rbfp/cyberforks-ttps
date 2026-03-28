@@ -41,8 +41,8 @@ dig +short TXT $DOMAIN
 ## Expected Output
 ```
 # corp.local — actual engagement output (2026-03-08)
-MX:    10 mx1.dandh.iphmx.com.  (Cisco IronPort ESA)
-       10 mx2.dandh.iphmx.com.
+MX:    10 mx1.target.iphmx.com.  (Cisco IronPort ESA)
+       10 mx2.target.iphmx.com.
 
 SPF:   "v=spf1 mx a ip4:8.28.219.30 ... include:spf.protection.outlook.com -all"
        → -all hardfail; includes M365 → dual-layer architecture confirmed

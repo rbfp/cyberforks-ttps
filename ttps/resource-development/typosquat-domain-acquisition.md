@@ -47,7 +47,7 @@ dig +short MX target-portal.com     → 10 mail.target-portal.com.
 ## Notes
 **corp.local engagement (2026-03-08):**
 - First domain used: `m365-verify.com` — BLOCKED by M365 EOP brand impersonation protection. The string `m365` in the domain triggers Microsoft's explicit brand protection regardless of SPF/DKIM/DMARC pass status. Mail quarantined even at 8.9/10 mail-tester score.
-- Second domain: `target-portal.com` (typosquat of `corp.local`, one char substitution: `dardh` vs `dandh`) — BYPASSED all filters, landed in inbox.
+- Second domain: `target-portal.com` (single-char substitution of target domain) — BYPASSED all filters, landed in inbox.
 - Lesson: When targeting M365 tenants, never use Microsoft product strings (`m365`, `outlook`, `azure`, `microsoft`, `office365`) in the sending domain.
 
 **Domain selection criteria:**
